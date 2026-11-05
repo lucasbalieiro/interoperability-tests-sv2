@@ -327,7 +327,7 @@ Reserved for a future Template Distribution Server suite. No scenarios yet.
 
 ## Suite Coverage
 
-✅ = covered; ❌ = not covered. The short title next to each ID is informational; the [Scenario Catalog](#scenario-catalog) is authoritative.
+✅ = covered; ❌ = not covered. The short title next to each ID is informational; the [Scenario Catalog](#scenario-catalog) is authoritative. This table is machine-checked against the scenario registry and each scenario's `/// Covers:` annotation by `tests/coverage.rs`; `cargo test --test coverage` fails on drift in either direction.
 
 | Scenario IDs | Mining Protocol Server |
 |---|---|

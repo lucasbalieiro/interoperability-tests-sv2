@@ -40,3 +40,5 @@ Set `SV2_TEST_ENDPOINT=host:port` (optionally `SV2_TEST_APP_TYPE`, `SV2_TEST_USE
 One module per Sv2 message family under `src/scenarios/{common,mining,...}/`. Scenario IDs are the stable `Proto-MSG-N` references from `COVERAGE.md` (e.g. `"C-SCS-2 used-version-within-range"`). Each scenario is an async fn returning `ScenarioResult` with a `/// Covers: <ID>` doc comment.
 
 Register it in the appropriate `entries()` fn in its submodule, then wire the submodule into the suite fn(s) in `src/scenarios/mod.rs`. Scenario fns are registered only once; suites compose them by inclusion, not duplication.
+
+Finally, update `COVERAGE.md`: add a row to the Scenario Catalog if the ID is new, and mark the scenario ✅ in the Suite Coverage table. `cargo test --test coverage` fails when the registry, the `/// Covers:` annotations, and the documentation tables drift apart in either direction.
