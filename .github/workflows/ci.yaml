@@ -51,6 +51,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-template-provider-
 
+      - name: Check COVERAGE.md drift
+        run: cargo test --test coverage
+
       - name: Test
         run: RUST_BACKTRACE=1 cargo test --all-targets
 
