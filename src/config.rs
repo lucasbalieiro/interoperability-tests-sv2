@@ -1,6 +1,6 @@
 //! TOML batch configuration for the `sv2-compliance` CLI.
 
-use std::{fs, net::SocketAddr, path::Path};
+use std::{fmt, fs, net::SocketAddr, path::Path, str::FromStr};
 
 use serde::Deserialize;
 
@@ -74,6 +74,81 @@ pub struct Site {
     pub template_provider_address: Option<SocketAddr>,
     pub user_identity: Option<String>,
 }
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "String")]
+pub struct HostPort {
+    pub host: String,
+    pub port: u16,
+}
+
+impl TryFrom<String> for HostPort {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl FromStr for HostPort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Let `SocketAddr` handle IPv4 and bracketed IPv6 literals.
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Self {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            });
+        }
+
+        if s.contains('/') {
+            return Err(format!(
+                "invalid address {s:?}: expected host:port, not a URL"
+            ));
+        }
+
+        let (host, port) = s.rsplit_once(':').ok_or_else(|| {
+            format!(
+                "invalid address {s:?}: expected host:port \
+                 (for example stratum.ckpool.org:3336)"
+            )
+        })?;
+
+        if host.is_empty() {
+            return Err(format!("invalid address {s:?}: host is empty"));
+        }
+
+        if host.contains(':') {
+            return Err(format!(
+                "invalid address {s:?}: IPv6 addresses must be bracketed, \
+                 for example [::1]:3333"
+            ));
+        }
+
+        if host.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "invalid address {s:?}: host must not contain whitespace"
+            ));
+        }
+
+        Ok(Self {
+            host: host.to_string(),
+            port: port
+                .parse()
+                .map_err(|_| format!("invalid address {s:?}: invalid port"))?,
+        })
+    }
+}
+
+impl fmt::Display for HostPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.host.contains(':') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -109,5 +184,54 @@ name = "Typo"
 mining_server_adress = "51.161.49.55:34255"
 "#;
         assert!(toml::from_str::<Config>(raw).is_err());
+    }
+
+    #[test]
+    fn parses_hostname_host_port() {
+        let addr: HostPort = "stratum.ckpool.org:3336".parse().unwrap();
+        assert_eq!(addr.host, "stratum.ckpool.org");
+        assert_eq!(addr.port, 3336);
+        assert_eq!(addr.to_string(), "stratum.ckpool.org:3336");
+    }
+
+    #[test]
+    fn parses_ip_literals() {
+        let ipv4: HostPort = "75.119.150.111:3333".parse().unwrap();
+        assert_eq!(ipv4.host, "75.119.150.111");
+        assert_eq!(ipv4.port, 3333);
+
+        let ipv6: HostPort = "[::1]:3334".parse().unwrap();
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.port, 3334);
+        assert_eq!(ipv6.to_string(), "[::1]:3334");
+    }
+
+    #[test]
+    fn rejects_invalid_addresses() {
+        for address in [
+            "sri.pool.org",                    // no port
+            ":3333",                           // no host
+            "::1:3333",                        // unbracketed IPv6
+            "stratum+tcp://sri.pool.org:3333", // URL
+            "sri.pool.org:not-a-port-number",  // invalid port
+            "sri pool.org:42",                 // host with a space
+            "sri\tpool.org:42",                // host with a tab
+        ] {
+            assert!(
+                address.parse::<HostPort>().is_err(),
+                "{address} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn host_port_deserializes_from_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            addr: HostPort,
+        }
+        let wrapper: Wrapper = toml::from_str("addr = \"localhost:3333\"").unwrap();
+        assert_eq!(wrapper.addr.host, "localhost");
+        assert_eq!(wrapper.addr.port, 3333);
     }
 }
