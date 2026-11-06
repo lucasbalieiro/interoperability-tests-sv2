@@ -6,7 +6,7 @@ use integration_tests_sv2::{
 };
 use interoperability_tests_sv2::{config::Config, runner::run_suite};
 
-/// The TOML batch path used by the CLI.
+/// The TOML batch path used by the CLI, with IP and hostname targets.
 #[tokio::test]
 async fn config_driven_run_against_pool() {
     start_tracing();
@@ -18,13 +18,20 @@ async fn config_driven_run_against_pool() {
 [[site]]
 name = "Local Pool"
 mining_server_address = "{pool_addr}"
-"#
-    );
-    let config: Config = toml::from_str(&raw).expect("valid toml");
-    let targets = config.targets();
-    assert_eq!(targets.len(), 1);
 
-    for target in &targets {
+[[site]]
+name = "Local Pool by hostname"
+mining_server_address = "localhost:{}"
+"#,
+        pool_addr.port()
+    );
+
+    let config: Config = toml::from_str(&raw).expect("valid toml");
+    let targets = config.resolve_targets().await;
+    assert!(targets.unresolved.is_empty());
+    assert_eq!(targets.resolved.len(), 2);
+
+    for target in &targets.resolved {
         let reports = run_suite(&target.endpoint).await;
         common::assert_suite(&reports);
     }

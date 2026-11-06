@@ -4,7 +4,8 @@ use clap::Parser;
 use colored::Colorize;
 use integration_tests_sv2::start_tracing;
 use interoperability_tests_sv2::{
-    config::Config,
+    app_type::AppType,
+    config::{Config, Target},
     runner::run_suite,
     scenarios::{ScenarioError, ScenarioReport},
 };
@@ -32,14 +33,14 @@ async fn main() {
     }
 
     let targets = match Config::from_path(&cli.config) {
-        Ok(config) => config.targets(),
+        Ok(config) => config.resolve_targets().await,
         Err(e) => {
             eprintln!("{} {e}", "error:".red().bold());
             std::process::exit(1);
         }
     };
 
-    if targets.is_empty() {
+    if targets.resolved.is_empty() && targets.unresolved.is_empty() {
         eprintln!("{} no endpoints configured to test", "error:".red().bold());
         std::process::exit(1);
     }
@@ -47,15 +48,11 @@ async fn main() {
     let mut passed = 0u32;
     let mut failed = 0u32;
     let mut not_exercised = 0u32;
-    for target in &targets {
-        println!(
-            "── {} ──",
-            format!(
-                "{}: {:?} at {}",
-                target.site_name, target.endpoint.app_type, target.endpoint.addr
-            )
-            .blue()
-            .bold()
+    for target in &targets.resolved {
+        print_target_header(
+            &target.site_name,
+            target.endpoint.app_type,
+            format!("{}{}", target.address, resolved_note(target)),
         );
         let reports = run_suite(&target.endpoint).await;
         for report in &reports {
@@ -69,32 +66,69 @@ async fn main() {
         println!();
     }
 
+    for target in &targets.unresolved {
+        print_target_header(
+            &target.site_name,
+            target.app_type,
+            target.address.to_string(),
+        );
+        println!("  {} target unresolved: {}", "✗".red(), target.error.red());
+        println!();
+    }
+
     let total = passed + failed + not_exercised;
     let not_exercised_note = if not_exercised > 0 {
         format!(", {not_exercised} not exercised")
     } else {
         String::new()
     };
-    if failed == 0 {
+
+    let unresolved_note = if targets.unresolved.is_empty() {
+        String::new()
+    } else {
+        format!("; {} target(s) unresolved", targets.unresolved.len())
+    };
+
+    if failed == 0 && targets.unresolved.is_empty() {
         println!(
-            "{} {}/{} scenarios passed{} across {} target(s)",
+            "{} {}/{} scenarios passed{} across {} resolved target(s)",
             "✓".green().bold(),
             passed,
             total,
             not_exercised_note,
-            targets.len()
+            targets.resolved.len()
         );
     } else {
         println!(
-            "{} {}/{} scenarios passed, {} failed{} across {} target(s)",
+            "{} {}/{} scenarios passed, {} failed{}{} across {} resolved target(s)",
             "✗".red().bold(),
             passed,
             total,
             failed,
             not_exercised_note,
-            targets.len()
+            unresolved_note,
+            targets.resolved.len()
         );
         std::process::exit(1);
+    }
+}
+
+fn print_target_header(site_name: &str, app_type: AppType, address: String) {
+    println!(
+        "── {} ──",
+        format!("{site_name}: {app_type:?} at {address}")
+            .blue()
+            .bold()
+    );
+}
+
+/// Shows the resolved IP when the configured address was a hostname.
+fn resolved_note(target: &Target) -> String {
+    let resolved = target.endpoint.addr;
+    if target.address.to_string() == resolved.to_string() {
+        String::new()
+    } else {
+        format!(" (resolved to {resolved})")
     }
 }
 
