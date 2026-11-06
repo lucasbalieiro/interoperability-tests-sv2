@@ -6,6 +6,10 @@
 #   template_provider_address      -> Template Provider (no scenarios yet, see COVERAGE.md)
 #
 # `user_identity` (optional) is used when opening mining channels.
+#
+# Addresses are `host:port`; the host may be a hostname or an IP address, e.g.
+# "stratum.ckpool.org:3336" or "51.81.56.15:3336". Hostnames are resolved when
+# the config is loaded, so they do not need to be pinned to an IP.
 
 [[site]]
 name = "SRI Community SoloPool"
