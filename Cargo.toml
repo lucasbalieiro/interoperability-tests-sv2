@@ -11,8 +11,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["stratum", "mining", "bitcoin", "protocol", "sv2", "interoperability"]
 
 [dependencies]
-integration_tests_sv2 = { git = "https://github.com/stratum-mining/sv2-apps", branch = "main" }
-stratum-apps = { git = "https://github.com/stratum-mining/sv2-apps", branch = "main", default-features = false, features = ["core"] }
+# Temporary: use the MockUpstream redesign from PR #991 until it lands on main.
+integration_tests_sv2 = { git = "https://github.com/lucasbalieiro/sv2-apps.git", branch = "test/integration-test-mock-helpers" }
+stratum-apps = { git = "https://github.com/lucasbalieiro/sv2-apps.git", branch = "test/integration-test-mock-helpers", default-features = false, features = ["core"] }
 async-channel = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
 clap = { version = "4", features = ["derive"] }
