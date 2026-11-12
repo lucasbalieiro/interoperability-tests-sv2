@@ -2315,6 +2315,7 @@ dependencies = [
  "async-channel",
  "clap",
  "colored",
+ "futures",
  "integration_tests_sv2",
  "serde",
  "stratum-apps",
