@@ -1,6 +1,6 @@
 //! TOML batch configuration for the `sv2-compliance` CLI.
 
-use std::{fs, net::SocketAddr, path::Path};
+use std::{fmt, fs, net::SocketAddr, path::Path, str::FromStr};
 
 use serde::Deserialize;
 
@@ -75,6 +75,84 @@ pub struct Site {
     pub user_identity: Option<String>,
 }
 
+/// A `host:port` address from the TOML config.
+///
+/// The host may be a DNS name, an IPv4 address, or a bracketed IPv6 address.
+#[derive(Debug, PartialEq, Clone, Deserialize)]
+#[serde(try_from = "String")]
+pub enum TargetAddress {
+    Socket(SocketAddr),
+    Hostname { host: String, port: u16 },
+}
+
+impl TryFrom<String> for TargetAddress {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl FromStr for TargetAddress {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            return Ok(Self::Socket(addr));
+        }
+
+        if s.contains('/') {
+            return Err(format!(
+                "invalid address {s:?}: expected host:port, not a URL"
+            ));
+        }
+
+        let (host, port) = s.rsplit_once(':').ok_or_else(|| {
+            format!(
+                "invalid address {s:?}: expected host:port \
+                 (for example stratum.ckpool.org:3336)"
+            )
+        })?;
+
+        if host.is_empty() {
+            return Err(format!("invalid address {s:?}: host is empty"));
+        }
+
+        if host.contains(':') {
+            return Err(format!(
+                "invalid address {s:?}: IPv6 addresses must be bracketed, \
+                 for example [::1]:3333"
+            ));
+        }
+
+        if host.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "invalid address {s:?}: host must not contain whitespace"
+            ));
+        }
+
+        if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return Err(format!("invalid address {s:?}: invalid IPv4 address"));
+        }
+
+        Ok(Self::Hostname {
+            host: host.to_string(),
+            port: port
+                .parse()
+                .map_err(|_| format!("invalid address {s:?}: invalid port"))?,
+        })
+    }
+}
+
+impl fmt::Display for TargetAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket(addr) => write!(f, "{addr}"),
+            Self::Hostname { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +187,79 @@ name = "Typo"
 mining_server_adress = "51.161.49.55:34255"
 "#;
         assert!(toml::from_str::<Config>(raw).is_err());
+    }
+
+    #[test]
+    fn parses_hostname_address() {
+        let addr: TargetAddress = "stratum.ckpool.org:3336".parse().unwrap();
+        assert_eq!(
+            addr,
+            TargetAddress::Hostname {
+                host: "stratum.ckpool.org".to_string(),
+                port: 3336,
+            }
+        );
+        assert_eq!(addr.to_string(), "stratum.ckpool.org:3336");
+    }
+
+    #[test]
+    fn parses_ip_literal() {
+        let ipv4: TargetAddress = "75.119.150.111:3333".parse().unwrap();
+        assert_eq!(
+            ipv4,
+            TargetAddress::Socket("75.119.150.111:3333".parse().unwrap())
+        );
+
+        let ipv6: TargetAddress = "[::1]:3334".parse().unwrap();
+        assert_eq!(ipv6, TargetAddress::Socket("[::1]:3334".parse().unwrap()));
+        assert_eq!(ipv6.to_string(), "[::1]:3334");
+    }
+
+    #[test]
+    fn target_address_rejects_url_with_clear_error() {
+        let error = "stratum+tcp://sri.pool.org:3333"
+            .parse::<TargetAddress>()
+            .unwrap_err();
+        assert!(
+            error.contains("not a URL"),
+            "expected a URL-specific error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn target_address_rejects_invalid_addresses() {
+        for address in [
+            "sri.pool.org",
+            ":3333",
+            "::1:3333",
+            "stratum+tcp://sri.pool.org:3333",
+            "sri.pool.org:not-a-port-number",
+            "sri pool.org:42",
+            "sri\tpool.org:42",
+            "51.161.49:34255",
+            "1.2.3:80",
+        ] {
+            assert!(
+                address.parse::<TargetAddress>().is_err(),
+                "{address} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn target_address_deserializes_from_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            addr: TargetAddress,
+        }
+
+        let wrapper: Wrapper = toml::from_str("addr = \"localhost:3333\"").unwrap();
+        assert_eq!(
+            wrapper.addr,
+            TargetAddress::Hostname {
+                host: "localhost".to_string(),
+                port: 3333,
+            }
+        );
     }
 }
