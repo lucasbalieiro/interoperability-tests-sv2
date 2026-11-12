@@ -5,7 +5,7 @@ use colored::Colorize;
 use integration_tests_sv2::start_tracing;
 use interoperability_tests_sv2::{
     app_type::AppType,
-    config::{Config, Target},
+    config::{Config, Target, TargetAddress},
     runner::run_suite,
     scenarios::{ScenarioError, ScenarioReport},
 };
@@ -25,8 +25,83 @@ struct Cli {
     verbose: bool,
 }
 
+#[derive(Default)]
+struct RunSummary {
+    passed: u32,
+    failed: u32,
+    not_exercised: u32,
+}
+impl RunSummary {
+    fn record(&mut self, report: &ScenarioReport) {
+        match &report.result {
+            Ok(_) => self.passed += 1,
+            Err(ScenarioError::NotExercised(_)) => self.not_exercised += 1,
+            Err(ScenarioError::Failed(_)) => self.failed += 1,
+        }
+    }
+
+    fn succeeded(&self, unresolved: usize) -> bool {
+        self.failed == 0 && unresolved == 0
+    }
+
+    fn summary_line(&self, resolved: usize, unresolved: usize) -> String {
+        if resolved == 0 && unresolved > 0 {
+            return format!(
+                "{} no targets resolved ({} unresolved)",
+                "✗".red().bold(),
+                unresolved
+            );
+        }
+
+        let total = self.passed + self.failed + self.not_exercised;
+        let failed_note = if self.failed > 0 {
+            format!(", {} failed", self.failed)
+        } else {
+            String::new()
+        };
+        let not_exercised_note = if self.not_exercised > 0 {
+            format!(", {} not exercised", self.not_exercised)
+        } else {
+            String::new()
+        };
+        let unresolved_note = if unresolved > 0 {
+            format!("; {unresolved} target(s) unresolved")
+        } else {
+            String::new()
+        };
+
+        if self.succeeded(unresolved) {
+            format!(
+                "{} {}/{} scenarios passed{} across {} resolved target(s)",
+                "✓".green().bold(),
+                self.passed,
+                total,
+                not_exercised_note,
+                resolved
+            )
+        } else {
+            format!(
+                "{} {}/{} scenarios passed{}{}{} across {} resolved target(s)",
+                "✗".red().bold(),
+                self.passed,
+                total,
+                failed_note,
+                not_exercised_note,
+                unresolved_note,
+                resolved
+            )
+        }
+    }
+
+    fn print(&self, resolved: usize, unresolved: usize) {
+        println!("{}", self.summary_line(resolved, unresolved));
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let mut summary = RunSummary::default();
+
     let cli = Cli::parse();
     if cli.verbose {
         start_tracing();
@@ -45,9 +120,6 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let mut not_exercised = 0u32;
     for target in &targets.resolved {
         print_target_header(
             &target.site_name,
@@ -56,12 +128,8 @@ async fn main() {
         );
         let reports = run_suite(&target.endpoint).await;
         for report in &reports {
+            summary.record(report);
             print_report(report);
-            match &report.result {
-                Ok(_) => passed += 1,
-                Err(ScenarioError::NotExercised(_)) => not_exercised += 1,
-                Err(ScenarioError::Failed(_)) => failed += 1,
-            }
         }
         println!();
     }
@@ -80,39 +148,9 @@ async fn main() {
         println!();
     }
 
-    let total = passed + failed + not_exercised;
-    let not_exercised_note = if not_exercised > 0 {
-        format!(", {not_exercised} not exercised")
-    } else {
-        String::new()
-    };
+    summary.print(targets.resolved.len(), targets.unresolved.len());
 
-    let unresolved_note = if targets.unresolved.is_empty() {
-        String::new()
-    } else {
-        format!("; {} target(s) unresolved", targets.unresolved.len())
-    };
-
-    if failed == 0 && targets.unresolved.is_empty() {
-        println!(
-            "{} {}/{} scenarios passed{} across {} resolved target(s)",
-            "✓".green().bold(),
-            passed,
-            total,
-            not_exercised_note,
-            targets.resolved.len()
-        );
-    } else {
-        println!(
-            "{} {}/{} scenarios passed, {} failed{}{} across {} resolved target(s)",
-            "✗".red().bold(),
-            passed,
-            total,
-            failed,
-            not_exercised_note,
-            unresolved_note,
-            targets.resolved.len()
-        );
+    if !summary.succeeded(targets.unresolved.len()) {
         std::process::exit(1);
     }
 }
@@ -128,11 +166,11 @@ fn print_target_header(site_name: &str, app_type: AppType, address: String) {
 
 /// Shows the resolved IP when the configured address was a hostname.
 fn resolved_note(target: &Target) -> String {
-    let resolved = target.endpoint.addr;
-    if target.address.to_string() == resolved.to_string() {
-        String::new()
-    } else {
-        format!(" (resolved to {resolved})")
+    match &target.address {
+        TargetAddress::Socket(_) => String::new(),
+        TargetAddress::Hostname { .. } => {
+            format!(" (resolved to {})", target.endpoint.addr)
+        }
     }
 }
 
