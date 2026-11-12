@@ -10,7 +10,9 @@ Built on top of [`integration_tests_sv2`](https://crates.io/crates/integration_t
 cargo run --bin sv2-compliance -- --config targets.toml
 ```
 
-`--config` defaults to `targets.toml` in the current directory. Exits `0` when no scenario fails, `1` otherwise; a scenario the endpoint legitimately did not let the client exercise (e.g. a standard-channel scenario against a server that set `REQUIRES_EXTENDED_CHANNELS`) is reported but does not fail the run. See `targets.example.toml` for the config format and `--help` for all options.
+`--config` defaults to `targets.toml` in the current directory. Addresses accept either an IP or a hostname followed by a port (e.g. `stratum.ckpool.org:3336`); hostnames are resolved before the run starts, and an unresolvable one is reported as a failed target without stopping the remaining sites. Exits `0` when no scenario fails and every target resolves, `1` otherwise; a scenario the endpoint legitimately did not let the client exercise (e.g. a standard-channel scenario against a server that set `REQUIRES_EXTENDED_CHANNELS`) is reported but does not fail the run. See `targets.example.toml` for the config format and `--help` for all options.
+
+Use `--verbose` to also print the underlying resolver message when a hostname fails to resolve.
 
 ## Library
 
@@ -28,6 +30,8 @@ async fn sv2_compliance() {
     assert!(!reports.iter().any(|r| r.failed()));
 }
 ```
+
+For TOML batches, `interoperability_tests_sv2::config::Config::from_path` parses the file and `resolve_targets().await` returns `Targets`, whose `resolved` and `unresolved` fields separate reachable targets from failed lookups. `Targets::is_empty()` reports a config with no addresses at all.
 
 ## Running the tests
 
