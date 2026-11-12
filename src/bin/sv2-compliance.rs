@@ -5,7 +5,7 @@ use colored::Colorize;
 use integration_tests_sv2::start_tracing;
 use interoperability_tests_sv2::{
     app_type::AppType,
-    config::{Config, Target, TargetAddress},
+    config::{Config, Target, TargetAddress, UnresolvedTarget},
     runner::run_suite,
     scenarios::{ScenarioError, ScenarioReport},
 };
@@ -20,7 +20,7 @@ struct Cli {
     #[arg(short = 'c', long, default_value = "targets.toml")]
     config: PathBuf,
 
-    /// Verbose logging
+    /// Verbose logging and resolver error details
     #[arg(short, long)]
     verbose: bool,
 }
@@ -135,17 +135,7 @@ async fn main() {
     }
 
     for target in &targets.unresolved {
-        print_target_header(
-            &target.site_name,
-            target.app_type,
-            target.address.to_string(),
-        );
-        println!(
-            "  {} target unresolved: {}",
-            "✗".red(),
-            target.error.to_string().red()
-        );
-        println!();
+        print_unresolved(target, cli.verbose);
     }
 
     summary.print(targets.resolved.len(), targets.unresolved.len());
@@ -162,6 +152,28 @@ fn print_target_header(site_name: &str, app_type: AppType, address: String) {
             .blue()
             .bold()
     );
+}
+
+fn print_unresolved(target: &UnresolvedTarget, verbose: bool) {
+    print_target_header(
+        &target.site_name,
+        target.app_type,
+        target.address.to_string(),
+    );
+
+    println!(
+        "  {} target unresolved: {}",
+        "✗".red(),
+        target.error.to_string().red()
+    );
+
+    if verbose {
+        if let Some(detail) = target.error.detail() {
+            println!("    {}", detail.dimmed());
+        }
+    }
+
+    println!();
 }
 
 /// Shows the resolved IP when the configured address was a hostname.
