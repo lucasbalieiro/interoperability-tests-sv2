@@ -145,18 +145,36 @@ impl TestClient {
         }
     }
 
+    /// Waits for the next message of any type from the endpoint, returning
+    /// `None` if `timeout` elapses first.
+    ///
+    /// A caller that makes several reads under one budget passes the remaining
+    /// time on each call, so a server that keeps sending unrelated messages
+    /// cannot keep the caller waiting past its deadline.
+    pub async fn next_from_server_within(
+        &self,
+        timeout: Duration,
+    ) -> Option<(u8, AnyMessageOwned)> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some((t, msg)) = self.sniffer.next_message_from_upstream() {
+                return Some((t, msg));
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            tokio::time::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now))).await;
+        }
+    }
+
     /// Waits for the next message of any type from the endpoint.
     pub async fn next_from_server(&self) -> Result<(u8, AnyMessageOwned), ScenarioError> {
-        tokio::time::timeout(DEFAULT_MSG_TIMEOUT, async {
-            loop {
-                if let Some((t, msg)) = self.sniffer.next_message_from_upstream() {
-                    return (t, msg);
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .map_err(|_| ScenarioError::Failed("timeout waiting for any message from endpoint".into()))
+        self.next_from_server_within(DEFAULT_MSG_TIMEOUT)
+            .await
+            .ok_or_else(|| {
+                ScenarioError::Failed("timeout waiting for any message from endpoint".into())
+            })
     }
 
     /// Asserts the endpoint sends no message of `msg_type` within `duration`.

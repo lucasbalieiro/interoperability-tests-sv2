@@ -3,11 +3,15 @@
 //! Covers catalog rows C-SC-*, C-SCS-*, C-SCE-*.
 
 use integration_tests_sv2::mock_roles::WithSetup;
-use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwned};
+use stratum_apps::stratum_core::parsers_sv2::{
+    message_type_to_name, AnyMessageOwned, CommonMessagesOwned,
+};
 
 use crate::{
-    client::{setup_connection, TestClient},
+    app_type::AppType,
+    client::{setup_connection, TestClient, DEFAULT_MSG_TIMEOUT},
     endpoint::Endpoint,
+    probe::{self, ProbeOutcome},
     scenarios::ScenarioError,
 };
 
@@ -110,34 +114,131 @@ pub async fn unsupported_version_rejected(endpoint: Endpoint) -> ScenarioResult 
 }
 
 // ---------------------------------------------------------------------------
-// C-SC-7 — unsupported protocol rejected
+// C-SC-7 — accepted protocol is actually served
 // ---------------------------------------------------------------------------
 
-/// The endpoint MUST reject a `SetupConnection` for a sub-protocol it does
-/// not serve with a framed `SetupConnectionError`.
+/// The endpoint MUST reject a `SetupConnection` for a sub-protocol it does not
+/// serve with a framed `SetupConnectionError` (§3.6.1). Because a `.Success`
+/// alone does not show whether the endpoint serves the protocol, the scenario
+/// sends that protocol's first client message and classifies the answer.
 ///
 /// Covers: C-SC-7
 pub async fn unsupported_protocol_rejected(endpoint: Endpoint) -> ScenarioResult {
-    let setup = setup_connection(endpoint.app_type.wrong_protocol(), 2, 2, 0);
-    let client = TestClient::connect_with_setup(&endpoint, WithSetup::Yes(setup)).await?;
+    let mut details = Vec::new();
+    let mut failed = false;
+    let mut inconclusive = false;
 
-    // Take whatever the endpoint answers first: a `.Success` is the violation
-    // and must fail right away, not after the message timeout.
-    match client.next_from_server().await? {
-        (_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(m))) => Ok(Some(
-            format!("error_code=\"{}\"", m.error_code.as_utf8_or_hex()),
-        )),
-        (_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(m))) => {
-            Err(format!(
-                "endpoint accepted the SetupConnection with used_version={}",
-                m.used_version
-            )
-            .into())
-        }
-        (msg_type, other) => {
-            Err(format!("expected SetupConnectionError, got type 0x{msg_type:02x}: {other}").into())
+    for probed in AppType::ALL
+        .into_iter()
+        .filter(|app_type| *app_type != endpoint.app_type)
+    {
+        match probe_endpoint(&endpoint, probed).await {
+            ProbeReport::Pass(detail) => details.push(detail),
+            ProbeReport::Fail(detail) => {
+                failed = true;
+                details.push(detail);
+            }
+            ProbeReport::Inconclusive(detail) => {
+                inconclusive = true;
+                details.push(detail);
+            }
         }
     }
+
+    let detail = details.join("; ");
+    if failed {
+        Err(ScenarioError::Failed(detail))
+    } else if inconclusive {
+        Err(ScenarioError::NotExercised(detail))
+    } else {
+        Ok(Some(detail))
+    }
+}
+
+/// How one protocol probe contributed to the scenario's outcome.
+enum ProbeReport {
+    Pass(String),
+    Fail(String),
+    Inconclusive(String),
+}
+
+/// Opens a connection for `probed`, reads its `SetupConnection` response, and
+/// probes the protocol when the endpoint accepted it.
+async fn probe_endpoint(endpoint: &Endpoint, probed: AppType) -> ProbeReport {
+    let label = protocol_label(probed);
+    let setup = setup_connection(probed.protocol(), 2, 2, probed.default_flags());
+    let client = match TestClient::connect_with_setup(endpoint, WithSetup::Yes(setup)).await {
+        Ok(client) => client,
+        Err(e) => {
+            return ProbeReport::Inconclusive(format!("{label}: probe connection failed: {e}"))
+        }
+    };
+
+    let (msg_type, msg) = match client.next_from_server().await {
+        Ok(msg) => msg,
+        Err(e) => {
+            return ProbeReport::Inconclusive(format!("{label}: no SetupConnection response: {e}"))
+        }
+    };
+
+    let used_version = match msg {
+        AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionError(m)) => {
+            return ProbeReport::Pass(format!(
+                "{label} rejected (error_code=\"{}\")",
+                m.error_code.as_utf8_or_hex()
+            ))
+        }
+        AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(m)) => m.used_version,
+        other => {
+            return ProbeReport::Inconclusive(format!(
+                "{label}: expected SetupConnection.Success or SetupConnection.Error, got type 0x{msg_type:02x}: {other}"
+            ))
+        }
+    };
+
+    match probe::probe_protocol(&client, probed, &endpoint.user_identity).await {
+        Ok(ProbeOutcome::Serves { msg_type }) => ProbeReport::Pass(format!(
+            "{label} also served (used_version={used_version}, reply {})",
+            message_type_to_name(msg_type)
+        )),
+        Ok(ProbeOutcome::WrongProtocol {
+            got,
+            msg_type,
+            msg,
+        }) => ProbeReport::Fail(format!(
+            "{label} accepted but answered {} with a {} message (type 0x{msg_type:02x}: {msg})",
+            probe::opening_request_name(probed),
+            got.name()
+        )),
+        Ok(ProbeOutcome::NotEstablished { reason }) => ProbeReport::Inconclusive(format!(
+            "{label} accepted but the probe could not be sent: {reason}"
+        )),
+        Ok(ProbeOutcome::NoResponse) => match probe::first_response_requirement(probed) {
+            Some(requirement) => ProbeReport::Fail(format!(
+                "{label} accepted but did not answer {} within {:?}; either it does not serve the protocol and should have sent SetupConnection.Error (§3.6.1), or it failed the requirement: {requirement}",
+                probe::opening_request_name(probed),
+                DEFAULT_MSG_TIMEOUT
+            )),
+            None => ProbeReport::Inconclusive(format!(
+                "{label} accepted but sent no {} response to {} within {:?}; §6.4.2 rate-limits this request and leaves `user_identifier` restrictions to the server, so whether the endpoint serves {} could not be determined",
+                probed.name(),
+                probe::opening_request_name(probed),
+                DEFAULT_MSG_TIMEOUT,
+                probed.name()
+            )),
+        },
+        Err(e) => ProbeReport::Inconclusive(format!(
+            "{label} accepted but the probe could not run: {e}"
+        )),
+    }
+}
+
+fn protocol_label(app_type: AppType) -> String {
+    format!(
+        "protocol={} ({})",
+        app_type.protocol() as u8,
+        app_type.name()
+    )
 }
 
 // ---------------------------------------------------------------------------
