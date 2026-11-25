@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
-use integration_tests_sv2::utils::create_upstream;
+use integration_tests_sv2::utils::handshake_as_client;
+use tokio_util::sync::CancellationToken;
 
 use crate::{app_type::AppType, scenarios::ScenarioError};
 
@@ -41,7 +42,15 @@ impl Endpoint {
             Some(e) => format!("endpoint unreachable: {e}"),
             None => format!("endpoint unreachable: connect timed out after {CONNECT_BUDGET:?}"),
         })?;
-        match tokio::time::timeout(CONNECT_BUDGET, create_upstream(stream)).await {
+
+        let cancellation = CancellationToken::new();
+        let outcome = tokio::time::timeout(
+            CONNECT_BUDGET,
+            handshake_as_client(stream, cancellation.clone()),
+        )
+        .await;
+        cancellation.cancel();
+        match outcome {
             Ok(Some(_)) => Ok(()),
             Ok(None) => Err("Noise handshake with endpoint failed".into()),
             Err(_) => Err(format!(

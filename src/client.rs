@@ -1,12 +1,6 @@
 use std::time::Duration;
 
-use async_channel::Sender;
-use integration_tests_sv2::{
-    interceptor::MessageDirection,
-    mock_roles::{MockDownstream, WithSetup},
-    sniffer::Sniffer,
-    start_sniffer,
-};
+use integration_tests_sv2::mocks::{ClientSetupConnection, MockClient};
 use stratum_apps::stratum_core::{
     common_messages_sv2::SetupConnectionOwned,
     mining_sv2::{
@@ -14,7 +8,7 @@ use stratum_apps::stratum_core::{
         OpenMiningChannelErrorOwned, OpenStandardMiningChannelOwned,
         OpenStandardMiningChannelSuccessOwned,
     },
-    parsers_sv2::{AnyMessageOwned, MiningOwned},
+    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, MiningOwned},
 };
 
 use crate::{endpoint::Endpoint, scenarios::ScenarioError};
@@ -25,46 +19,51 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A test client connected to an endpoint under test.
 ///
-/// Wires `MockDownstream -> Sniffer -> endpoint`: messages are driven through
-/// [`TestClient::send`] and everything the endpoint sends back is observed via
-/// the sniffer (a `MockDownstream` only logs responses, it cannot read them).
+/// Messages are driven through [`TestClient::send`], and the endpoint's
+/// replies are read from the [`MockClient`] that owns the connection.
 ///
-/// Every wait is bounded by [`TestClient::next_from_server`]'s timeout: the
-/// panicking `Sniffer::wait_for_message_type` primitive is deliberately never
-/// used.
+/// Every wait is bounded: [`TestClient::next_from_server`] applies
+/// [`DEFAULT_MSG_TIMEOUT`], and [`TestClient::expect_silence`] takes its own
+/// deadline. A connection that fails inside the mock panics on the next read;
+/// `runner::run_suite` reports that panic as a failed scenario.
 pub struct TestClient {
-    sender: Sender<AnyMessageOwned>,
-    sniffer: Sniffer<'static>,
+    client: MockClient,
 }
 
 impl TestClient {
     /// Connects and performs the `SetupConnection` handshake with the
     /// protocol and flags appropriate for `endpoint.app_type`.
     pub async fn connect(endpoint: &Endpoint) -> Result<Self, ScenarioError> {
-        let setup = WithSetup::yes_with_defaults(
-            endpoint.app_type.protocol(),
-            endpoint.app_type.default_flags(),
-        );
-        Self::connect_with_setup(endpoint, setup).await
+        let setup = ClientSetupConnection {
+            protocol: endpoint.app_type.protocol(),
+            min_version: 2,
+            max_version: 2,
+            flags: endpoint.app_type.default_flags(),
+        };
+        let client = MockClient::new(endpoint.addr, Some(setup)).await;
+        Ok(Self { client })
     }
 
-    /// Connects and sends a custom `SetupConnection` (for negotiation edge cases).
+    /// Connects and sends the caller's full `SetupConnection`, for
+    /// negotiation edge cases where the message itself is under test.
     pub async fn connect_with_setup(
         endpoint: &Endpoint,
-        setup: WithSetup,
+        setup: SetupConnectionOwned,
     ) -> Result<Self, ScenarioError> {
-        let (sniffer, sniffer_addr) =
-            start_sniffer("test-client", endpoint.addr, false, vec![], None);
-        let sender = MockDownstream::new(sniffer_addr, setup).start().await;
-        Ok(Self { sender, sniffer })
+        let client = MockClient::new(endpoint.addr, None).await;
+
+        client
+            .send(AnyMessageOwned::Common(
+                CommonMessagesOwned::SetupConnection(setup),
+            ))
+            .await;
+        Ok(Self { client })
     }
 
     /// Sends a message to the endpoint.
     pub async fn send(&self, msg: AnyMessageOwned) -> Result<(), ScenarioError> {
-        self.sender
-            .send(msg)
-            .await
-            .map_err(|e| format!("failed to send message: {e}").into())
+        self.client.send(msg).await;
+        Ok(())
     }
 
     /// Opens a standard channel. A refusal with `OpenMiningChannel.Error` is
@@ -132,7 +131,7 @@ impl TestClient {
     pub async fn next_from_server(&self) -> Result<(u8, AnyMessageOwned), ScenarioError> {
         tokio::time::timeout(DEFAULT_MSG_TIMEOUT, async {
             loop {
-                if let Some((t, msg)) = self.sniffer.next_message_from_upstream() {
+                if let Some((t, msg)) = self.client.next_message() {
                     return (t, msg);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -149,8 +148,8 @@ impl TestClient {
         duration: Duration,
     ) -> Result<(), ScenarioError> {
         if self
-            .sniffer
-            .assert_message_not_present(MessageDirection::ToDownstream, msg_type, duration)
+            .client
+            .assert_message_not_present(msg_type, duration)
             .await
         {
             Ok(())

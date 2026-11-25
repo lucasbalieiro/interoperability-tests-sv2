@@ -2,7 +2,6 @@
 //!
 //! Covers catalog rows C-SC-*, C-SCS-*, C-SCE-*.
 
-use integration_tests_sv2::mock_roles::WithSetup;
 use stratum_apps::stratum_core::parsers_sv2::{AnyMessageOwned, CommonMessagesOwned};
 
 use crate::{
@@ -84,7 +83,7 @@ pub async fn unsupported_version_rejected(endpoint: Endpoint) -> ScenarioResult 
 
     for (min, max) in UNSUPPORTED_VERSION_RANGES {
         let setup = setup_connection(protocol, min, max, flags);
-        let client = TestClient::connect_with_setup(&endpoint, WithSetup::Yes(setup)).await?;
+        let client = TestClient::connect_with_setup(&endpoint, setup).await?;
         let (msg_type, msg) = client.next_from_server().await.map_err(|e| {
             ScenarioError::Failed(format!("no response to version range ({min},{max}): {e}"))
         })?;
@@ -119,7 +118,7 @@ pub async fn unsupported_version_rejected(endpoint: Endpoint) -> ScenarioResult 
 /// Covers: C-SC-7
 pub async fn unsupported_protocol_rejected(endpoint: Endpoint) -> ScenarioResult {
     let setup = setup_connection(endpoint.app_type.wrong_protocol(), 2, 2, 0);
-    let client = TestClient::connect_with_setup(&endpoint, WithSetup::Yes(setup)).await?;
+    let client = TestClient::connect_with_setup(&endpoint, setup).await?;
 
     // Take whatever the endpoint answers first: a `.Success` is the violation
     // and must fail right away, not after the message timeout.
