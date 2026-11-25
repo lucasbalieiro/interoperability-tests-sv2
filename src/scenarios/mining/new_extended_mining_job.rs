@@ -64,10 +64,12 @@ async fn first_job(endpoint: &Endpoint) -> Result<NewExtendedMiningJobOwned, Sce
         max_target: [0xff_u8; 32].into(),
         min_extranonce_size: 4,
     };
-    client
-        .open_extended_channel(open)
-        .await?
-        .map_err(|e| format!("server refused an extended channel (M-OEMC-1): {e}"))?;
+    client.open_extended_channel(open).await?.map_err(|e| {
+        ScenarioError::not_exercised(format!(
+            "server refused an extended channel (error_code=\"{}\")",
+            e.error_code.as_utf8_or_hex()
+        ))
+    })?;
 
     match client.next_from_server().await? {
         (_, AnyMessageOwned::Mining(MiningOwned::NewExtendedMiningJob(job))) => Ok(job),

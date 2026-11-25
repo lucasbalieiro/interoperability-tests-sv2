@@ -3,7 +3,11 @@
 use stratum_apps::stratum_core::mining_sv2::OpenExtendedMiningChannelOwned;
 
 use super::super::ScenarioResult;
-use crate::{client::TestClient, endpoint::Endpoint, scenarios::ScenarioFn};
+use crate::{
+    client::TestClient,
+    endpoint::Endpoint,
+    scenarios::{ScenarioError, ScenarioFn},
+};
 
 const REQUEST_ID: u32 = 1;
 const MIN_EXTRANONCE_SIZE: u16 = 4;
@@ -25,10 +29,12 @@ pub async fn request_id_echo(endpoint: Endpoint) -> ScenarioResult {
         max_target: [0xff_u8; 32].into(),
         min_extranonce_size: MIN_EXTRANONCE_SIZE,
     };
-    let m = client
-        .open_extended_channel(open)
-        .await?
-        .map_err(|e| format!("server refused an extended channel (M-OEMC-1): {e}"))?;
+    let m = client.open_extended_channel(open).await?.map_err(|e| {
+        ScenarioError::not_exercised(format!(
+            "server refused an extended channel (error_code=\"{}\")",
+            e.error_code.as_utf8_or_hex()
+        ))
+    })?;
     if m.request_id != REQUEST_ID {
         return Err(format!("request_id must echo {REQUEST_ID}, got {}", m.request_id).into());
     }

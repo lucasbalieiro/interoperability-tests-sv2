@@ -14,7 +14,7 @@ use stratum_apps::stratum_core::{
         OpenMiningChannelErrorOwned, OpenStandardMiningChannelOwned,
         OpenStandardMiningChannelSuccessOwned,
     },
-    parsers_sv2::{AnyMessageOwned, CommonMessagesOwned, MiningOwned},
+    parsers_sv2::{AnyMessageOwned, MiningOwned},
 };
 
 use crate::{endpoint::Endpoint, scenarios::ScenarioError};
@@ -22,9 +22,6 @@ use crate::{endpoint::Endpoint, scenarios::ScenarioError};
 /// How long a scenario waits for a message from the endpoint before failing.
 pub const DEFAULT_MSG_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// Bit 1 of `SetupConnection.Success.flags` (§5.3.1): the server will not
-/// open a standard channel on this connection.
-const REQUIRES_EXTENDED_CHANNELS: u32 = 1 << 1;
 
 /// A test client connected to an endpoint under test.
 ///
@@ -71,10 +68,9 @@ impl TestClient {
     }
 
     /// Opens a standard channel. A refusal with `OpenMiningChannel.Error` is
-    /// *not exercised* when the server set `REQUIRES_EXTENDED_CHANNELS` in
-    /// `SetupConnection.Success.flags`, since it announced it would not open
-    /// one (§5.3.1, C-SC-5). Without that flag the server MUST accept standard
-    /// channels (§5.2.2), so the refusal is a failure (M-OSMC-4).
+    /// *not exercised* (§5.3.2, §5.3.6): the spec allows a server to refuse an
+    /// open (e.g. restrictions on `user_identity` or `max_target`), so the
+    /// channel was not opened and subsequent assertions cannot be checked.
     pub async fn open_standard_channel(
         &self,
         open: OpenStandardMiningChannelOwned,
@@ -83,30 +79,18 @@ impl TestClient {
             MiningOwned::OpenStandardMiningChannel(open),
         ))
         .await?;
-        // Skip whatever is still queued from before the open, keeping the
-        // `SetupConnection.Success` flags on the way; stop at the open's
-        // response. A caller that consumed the `.Success` frame itself leaves
-        // the flag unseen, and a refusal is then judged as a failure.
-        let mut requires_extended_channels = false;
+        // Skip whatever is still queued from before the open (the
+        // `SetupConnection.Success` frame); stop at the open's response.
         loop {
             match self.next_from_server().await? {
-                (_, AnyMessageOwned::Common(CommonMessagesOwned::SetupConnectionSuccess(m))) => {
-                    requires_extended_channels = m.flags & REQUIRES_EXTENDED_CHANNELS != 0;
-                }
                 (_, AnyMessageOwned::Mining(MiningOwned::OpenStandardMiningChannelSuccess(m))) => {
                     return Ok(m)
                 }
                 (_, AnyMessageOwned::Mining(MiningOwned::OpenMiningChannelError(e))) => {
                     let code = e.error_code.as_utf8_or_hex();
-                    return Err(if requires_extended_channels {
-                        ScenarioError::not_exercised(format!(
-                            "server refused a standard channel (error_code=\"{code}\")"
-                        ))
-                    } else {
-                        ScenarioError::Failed(format!(
-                            "server refused a standard channel without REQUIRES_EXTENDED_CHANNELS (M-OSMC-4): error_code=\"{code}\""
-                        ))
-                    });
+                    return Err(ScenarioError::not_exercised(format!(
+                        "server refused a standard channel (error_code=\"{code}\")"
+                    )));
                 }
                 _ => continue,
             }
@@ -116,9 +100,8 @@ impl TestClient {
     /// Opens an extended channel and returns the endpoint's answer: `Ok` on
     /// `.Success`, `Err` on `OpenMiningChannel.Error`. Unlike a standard
     /// channel, a refusal is handed back rather than mapped to an outcome,
-    /// because scenarios disagree on what it means: §5.3.4 allows it as an
-    /// answer to `min_extranonce_size`, while §5.2.2 makes extended-channel
-    /// support mandatory (M-OEMC-1).
+    /// so calling scenarios can decide whether to assert against the error
+    /// (e.g. M-OEMCS-3) or report downstream assertions as not exercised.
     pub async fn open_extended_channel(
         &self,
         open: OpenExtendedMiningChannelOwned,
