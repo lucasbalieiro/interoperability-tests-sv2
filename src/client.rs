@@ -17,6 +17,17 @@ use crate::{endpoint::Endpoint, scenarios::ScenarioError};
 pub const DEFAULT_MSG_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How a bounded wait for a message from the endpoint ended.
+#[derive(Debug)]
+pub enum ReadOutcome {
+    /// A message arrived before the deadline.
+    Message(u8, AnyMessageOwned),
+    /// The deadline passed while the connection was still open and silent.
+    Timeout,
+    /// The endpoint closed the connection before a message arrived.
+    ConnectionClosed,
+}
+
 /// A test client connected to an endpoint under test.
 ///
 /// Messages are driven through [`TestClient::send`], and the endpoint's
@@ -51,17 +62,23 @@ impl TestClient {
         setup: SetupConnectionOwned,
     ) -> Result<Self, ScenarioError> {
         let client = MockClient::new(endpoint.addr, None).await;
-
+        let client = Self { client };
         client
             .send(AnyMessageOwned::Common(
                 CommonMessagesOwned::SetupConnection(setup),
             ))
-            .await;
-        Ok(Self { client })
+            .await?;
+        Ok(client)
     }
 
     /// Sends a message to the endpoint.
+    ///
+    /// A connection the endpoint already closed is reported as an error rather
+    /// than written to, so a caller can classify it instead of panicking.
     pub async fn send(&self, msg: AnyMessageOwned) -> Result<(), ScenarioError> {
+        if self.is_closed().await {
+            return Err("connection is closed".into());
+        }
         self.client.send(msg).await;
         Ok(())
     }
@@ -127,18 +144,52 @@ impl TestClient {
         }
     }
 
+    /// Waits for the next message of any type from the endpoint, telling a
+    /// live but silent connection apart from one the endpoint closed.
+    ///
+    /// A caller that makes several reads under one budget passes the remaining
+    /// time on each call, so a server that keeps sending unrelated messages
+    /// cannot keep the caller waiting past its deadline.
+    pub async fn next_from_server_or_closed_within(&self, timeout: Duration) -> ReadOutcome {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some((t, msg)) = self.client.next_message() {
+                return ReadOutcome::Message(t, msg);
+            }
+            if self.is_closed().await {
+                return ReadOutcome::ConnectionClosed;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return ReadOutcome::Timeout;
+            }
+            tokio::time::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(now))).await;
+        }
+    }
+
     /// Waits for the next message of any type from the endpoint.
     pub async fn next_from_server(&self) -> Result<(u8, AnyMessageOwned), ScenarioError> {
-        tokio::time::timeout(DEFAULT_MSG_TIMEOUT, async {
-            loop {
-                if let Some((t, msg)) = self.client.next_message() {
-                    return (t, msg);
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
+        match self
+            .next_from_server_or_closed_within(DEFAULT_MSG_TIMEOUT)
+            .await
+        {
+            ReadOutcome::Message(msg_type, msg) => Ok((msg_type, msg)),
+            ReadOutcome::Timeout => Err("timeout waiting for any message from endpoint".into()),
+            ReadOutcome::ConnectionClosed => {
+                Err("connection closed while waiting for a message from endpoint".into())
             }
-        })
-        .await
-        .map_err(|_| ScenarioError::Failed("timeout waiting for any message from endpoint".into()))
+        }
+    }
+
+    /// Whether the endpoint closed this client's connection.
+    ///
+    /// Polls the mock client's close watcher with a zero timeout, so it answers
+    /// without blocking. A connection that failed inside the mock panics here,
+    /// as it does on the next read.
+    pub async fn is_closed(&self) -> bool {
+        tokio::time::timeout(Duration::ZERO, self.client.wait_for_close())
+            .await
+            .is_ok()
     }
 
     /// Asserts the endpoint sends no message of `msg_type` within `duration`.
